@@ -1,0 +1,201 @@
+namespace :load do
+  task :defaults do
+    set :tincan_default_hooks, -> { true }
+
+    set :tincan_pid, -> { File.join(shared_path, 'tmp', 'pids', 'tincan.pid') }
+    set :tincan_env, -> { fetch(:rack_env, fetch(:rails_env, fetch(:stage))) }
+    set :tincan_log, -> { File.join(shared_path, 'log', 'tincan.log') }
+    set :tincan_timeout, -> { 10 }
+    set :tincan_role, -> { :app }
+    set :tincan_processes, -> { 1 }
+    # Rbenv and RVM integration
+    set :rbenv_map_bins, fetch(:rbenv_map_bins).to_a.concat(%w(tincan tincanctl))
+    set :rvm_map_bins, fetch(:rvm_map_bins).to_a.concat(%w(tincan tincanctl))
+  end
+
+end
+
+namespace :deploy do
+  before :starting, :check_tincan_hooks do
+    invoke 'tincan:add_default_hooks' if fetch(:tincan_default_hooks)
+  end
+end
+
+namespace :tincan do
+  def for_each_process(reverse = false)
+    pids = processes_pids
+    pids.reverse! if reverse
+    pids.each_with_index do |pid_file, idx|
+      within current_path do
+        yield(pid_file, idx)
+      end
+    end
+  end
+
+  def processes_pids
+    pids = []
+    fetch(:tincan_processes).times do |idx|
+      if pids.push(idx.zero? && fetch(:tincan_processes) <= 1)
+        fetch(:tincan_pid)
+      else
+        fetch(:tincan_pid).gsub(/\.pid$/, "-#{idx}.pid")
+      end
+    end
+    pids
+  end
+
+  def pid_process_exists?(pid_file)
+    pid_file_exists?(pid_file) && test("kill -0 $( cat #{pid_file} )")
+  end
+
+  def pid_file_exists?(pid_file)
+    test("[ -f #{pid_file} ]")
+  end
+
+  def stop_tincan(pid_file)
+    if fetch(:stop_tincan_in_background, fetch(:tincan_run_in_background))
+      if fetch(:tincan_use_signals)
+        background "kill -TERM `cat #{pid_file}`"
+      else
+        background :bundle, :exec, :tincanctl, 'stop', "#{pid_file}", fetch(:tincan_timeout)
+      end
+    else
+      execute :bundle, :exec, :tincanctl, 'stop', "#{pid_file}", fetch(:tincan_timeout)
+    end
+  end
+
+  def quiet_tincan(pid_file)
+    if fetch(:tincan_use_signals)
+      background "kill -USR1 `cat #{pid_file}`"
+    else
+      begin
+        execute :bundle, :exec, :tincanctl, 'quiet', "#{pid_file}"
+      rescue SSHKit::Command::Failed
+        # If gems are not installed eq(first deploy) and tincan_default_hooks as active
+        warn 'tincanctl not found (ignore if this is the first deploy)'
+      end
+    end
+  end
+
+  def start_tincan(pid_file, idx = 0)
+    args = []
+    args.push "--index #{idx}"
+    args.push "--pidfile #{pid_file}"
+    args.push "--environment #{fetch(:tincan_env)}"
+    args.push "--logfile #{fetch(:tincan_log)}" if fetch(:tincan_log)
+    args.push "--require #{fetch(:tincan_require)}" if fetch(:tincan_require)
+    args.push "--tag #{fetch(:tincan_tag)}" if fetch(:tincan_tag)
+    args.push "--queue #{fetch(:tincan_queue)}" if fetch(:tincan_queue)
+    args.push "--config #{fetch(:tincan_config)}" if fetch(:tincan_config)
+    # use tincan_options for special options
+    args.push fetch(:tincan_options) if fetch(:tincan_options)
+
+    if defined?(JRUBY_VERSION)
+      args.push '>/dev/null 2>&1 &'
+      warn 'Since JRuby doesn\'t support Process.daemon, tincan will not be running as a daemon.'
+    else
+      args.push '--daemon'
+    end
+
+    if fetch(:start_tincan_in_background, fetch(:tincan_run_in_background))
+      background :bundle, :exec, :tincan, args.compact.join(' ')
+    else
+      execute :bundle, :exec, :tincan, args.compact.join(' ')
+    end
+  end
+
+  task :add_default_hooks do
+    after 'deploy:starting', 'tincan:quiet'
+    after 'deploy:updated', 'tincan:stop'
+    after 'deploy:reverted', 'tincan:stop'
+    after 'deploy:published', 'tincan:start'
+  end
+
+  desc 'Quiet tincan (stop processing new tasks)'
+  task :quiet do
+    on roles fetch(:tincan_role) do
+      if test("[ -d #{current_path} ]") # fixes #11
+        for_each_process(true) do |pid_file, _|
+          quiet_tincan(pid_file) if pid_process_exists?(pid_file)
+        end
+      end
+    end
+  end
+
+  desc 'Stop tincan'
+  task :stop do
+    on roles fetch(:tincan_role) do
+      if test("[ -d #{current_path} ]")
+        for_each_process(true) do |pid_file, _|
+          stop_tincan(pid_file) if pid_process_exists?(pid_file)
+        end
+      end
+    end
+  end
+
+  desc 'Start tincan'
+  task :start do
+    on roles fetch(:tincan_role) do
+      for_each_process do |pid_file, idx|
+        start_tincan(pid_file, idx) unless pid_process_exists?(pid_file)
+      end
+    end
+  end
+
+  desc 'Restart tincan'
+  task :restart do
+    invoke 'tincan:stop'
+    invoke 'tincan:start'
+  end
+
+  desc 'Rolling-restart tincan'
+  task :rolling_restart do
+    on roles fetch(:tincan_role) do
+      for_each_process(true) do |pid_file, idx|
+        stop_tincan(pid_file) if pid_process_exists?(pid_file)
+        start_tincan(pid_file, idx)
+      end
+    end
+  end
+
+  # Delete any pid file not in use
+  task :cleanup do
+    on roles fetch(:tincan_role) do
+      for_each_process do |pid_file, _|
+        if pid_file_exists?(pid_file)
+          execute "rm #{pid_file}" unless pid_process_exists?(pid_file)
+        end
+      end
+    end
+  end
+
+  # TODO : Don't start if all proccess are off, raise warning.
+  desc 'Respawn missing tincan proccesses'
+  task :respawn do
+    invoke 'tincan:cleanup'
+    on roles fetch(:tincan_role) do
+      for_each_process do |pid_file, idx|
+        start_tincan(pid_file, idx) unless pid_file_exists?(pid_file)
+      end
+    end
+  end
+
+  def template_tincan(from, to, role)
+    [
+      File.join('lib', 'capistrano', 'templates', "#{from}-#{role.hostname}-#{fetch(:stage)}.rb"),
+      File.join('lib', 'capistrano', 'templates', "#{from}-#{role.hostname}.rb"),
+      File.join('lib', 'capistrano', 'templates', "#{from}-#{fetch(:stage)}.rb"),
+      File.join('lib', 'capistrano', 'templates', "#{from}.rb.erb"),
+      File.join('lib', 'capistrano', 'templates', "#{from}.rb"),
+      File.join('lib', 'capistrano', 'templates', "#{from}.erb"),
+      File.expand_path("../../templates/#{from}.rb.erb", __FILE__),
+      File.expand_path("../../templates/#{from}.erb", __FILE__)
+    ].each do |path|
+      next unless File.file?(path)
+      erb = File.read(path)
+      upload! StringIO.new(ERB.new(erb).result(binding)), to
+      break
+    end
+  end
+
+end
