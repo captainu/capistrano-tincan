@@ -1,4 +1,4 @@
-Copyright (c) 2014 Ben Kreeger
+Copyright (c) 2014 CaptainU, LLC.
 
 MIT License
 
