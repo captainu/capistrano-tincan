@@ -44,7 +44,6 @@ Capistrano::Configuration.instance.load do
 
     def start_process(pid_file, idx)
       args = []
-      args.push "--index #{idx}"
       args.push "--pidfile #{pid_file}"
       args.push "--environment #{fetch(:tincan_env)}"
       args.push "--logfile #{fetch(:tincan_log)}" if fetch(:tincan_log)

@@ -79,13 +79,11 @@ namespace :tincan do
 
   def start_tincan(pid_file, idx = 0)
     args = []
-    args.push "--index #{idx}"
     args.push "--pidfile #{pid_file}"
     args.push "--environment #{fetch(:tincan_env)}"
     args.push "--logfile #{fetch(:tincan_log)}" if fetch(:tincan_log)
     args.push "--require #{fetch(:tincan_require)}" if fetch(:tincan_require)
     args.push "--tag #{fetch(:tincan_tag)}" if fetch(:tincan_tag)
-    args.push "--queue #{fetch(:tincan_queue)}" if fetch(:tincan_queue)
     args.push "--config #{fetch(:tincan_config)}" if fetch(:tincan_config)
     # use tincan_options for special options
     args.push fetch(:tincan_options) if fetch(:tincan_options)
