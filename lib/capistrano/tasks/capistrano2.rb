@@ -12,7 +12,6 @@ Capistrano::Configuration.instance.load do
   _cset(:tincanctl_cmd) { "#{fetch(:bundle_cmd, 'bundle')} exec tincanctl" }
 
   _cset(:tincan_timeout) { 10 }
-  _cset(:tincan_role) { :app }
   _cset(:tincan_processes) { 1 }
 
   if fetch(:tincan_default_hooks)
